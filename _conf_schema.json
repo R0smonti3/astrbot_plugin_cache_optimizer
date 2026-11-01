@@ -1,0 +1,38 @@
+{
+  "enabled": {
+    "description": "开启缓存保活",
+    "hint": "总开关。开启后自动调整上下文切片方式与系统提示词结构，帮助大模型命中缓存。",
+    "type": "bool",
+    "default": true
+  },
+  "low_watermark_turns": {
+    "description": "修剪后保留轮数",
+    "hint": "历史消息过长触发清理时，至少保留最近多少轮对话（1轮包含你的一问和AI的一答，即2条消息）。默认 18 轮。",
+    "type": "int",
+    "default": 18
+  },
+  "step_turns": {
+    "description": "分块清理步长",
+    "hint": "每次多聊多少轮才修剪一次历史。在此步长范围内历史开头位置保持固定，帮助模型连续复用缓存；步长越大，前缀保持不动的轮数越多。默认 12 轮。",
+    "type": "int",
+    "default": 12
+  },
+  "freeze_system_prompt": {
+    "description": "固定系统提示词（时间移至提问末尾）",
+    "hint": "将系统提示词中随时间变动的当前时间移到当轮用户提问末尾，保持开头的系统提示词文本恒定，避免时间跳变导致整段缓存失效。推荐开启。",
+    "type": "bool",
+    "default": true
+  },
+  "auto_patch_framework_config": {
+    "description": "自动放宽框架历史轮数",
+    "hint": "若 AstrBot 原生设置的会话轮数上限小于清理门槛，自动在运行时调大，避免框架提前删消息导致本插件失效。推荐开启。",
+    "type": "bool",
+    "default": true
+  },
+  "debug_log": {
+    "description": "输出调试日志",
+    "hint": "开启后在终端输出每次请求的保留轮数与切片情况，用于排查效果。日常使用建议关闭。",
+    "type": "bool",
+    "default": false
+  }
+}

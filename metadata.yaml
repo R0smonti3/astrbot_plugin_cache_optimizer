@@ -1,0 +1,22 @@
+name: astrbot_plugin_cache_optimizer
+display_name: 提高缓存命中 (CacheOptimizer)
+short_desc: 减少上下文变动，提升 DeepSeek 等模型的提示词缓存命中率，降低调用成本与响应延迟
+desc: >-
+  专为支持前缀缓存（Prefix Cache）的大模型（如 DeepSeek、Kimi 等）设计。
+  当发送给模型的上文开头保持不变时，模型服务商会复用已有的缓存，输入计费大幅降低且响应更快。
+  本插件通过两项调整帮助模型更稳定地复用缓存：
+  1. 上下文分块修剪：对话过长时积攒一批再一次性清理，避免每次请求的起始位置频繁前移；
+  2. 系统提示词固定：将系统提示词中动态变化的当前时间移到当轮用户提问末尾，保持开头的提示词内容始终固定。
+help: 后台自动生效，无需特殊配置。管理员发送 /cache_opt 可查看请求优化与修剪统计。
+version: 1.0.0
+author: R0smonti3
+repo: https://github.com/R0smonti3/astrbot_plugin_cache_optimizer
+license: MIT
+category: AI 增强
+tags:
+  - 缓存优化
+  - DeepSeek
+  - 前缀缓存
+  - 降低成本
+  - 性能优化
+astrbot_version: ">=4.17.0"
