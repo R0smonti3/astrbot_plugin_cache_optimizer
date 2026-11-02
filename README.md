@@ -49,18 +49,19 @@
 
 > [!IMPORTANT]
 > ### 关键配置指引：务必将原生「压缩策略」选为「按对话轮数截断」
-> AstrBot 原生默认的溢出策略为 `llm_compress`（AI 摘要压缩）。当上下文较长时，框架可能调用模型重写历史为一段前情提要，导致前缀缓存被彻底粉碎。
+> AstrBot 原生默认的溢出策略为 `llm_compress`（由 LLM 压缩上下文）。当上下文较长时，框架可能调用额外模型将历史重写为一段摘要，导致已建立的前缀缓存被彻底粉碎。
 > 
-> **强烈建议按以下路径调整**：
-> 1. 打开 WebUI 导航栏的 **「AI」** $\rightarrow$ **「AstrBot 内置 AI」**；
-> 2. 切换到 **「高级」** 标签页 $\rightarrow$ 找到 **「上下文管理策略」**；
-> 3. 将 **「压缩策略」** 下拉框切换为 **「按对话轮数截断」**（即 `truncate_by_turns`）并保存。
+> **操作路径**：
+> 1. 打开 WebUI 左侧导航栏的 **「配置文件」**；
+> 2. 点击进入 **「AI」** → 点击 **「AstrBot 内置 AI」**；
+> 3. 在上方切换到 **「高级」** 标签页 → 找到 **「上下文管理策略」** 区域；
+> 4. 将 **「压缩策略」** 下拉框由原先的“由 LLM 压缩上下文”切换为 **「按对话轮数截断」**（对应 `truncate_by_turns`）并保存。
 > 
 > <p align="center">
->   <img src="https://raw.githubusercontent.com/R0smonti3/astrbot_plugin_cache_optimizer/main/docs/config_truncate.png" width="700" alt="配置图解">
+>   <img src="https://raw.githubusercontent.com/R0smonti3/astrbot_plugin_cache_optimizer/main/docs/config_truncate.png" width="850" alt="配置图解">
 > </p>
 > 
-> *(注：同时建议在该界面的更多配置中，将最大上下文轮数 `max_turns` 设置为 `-1` 或调大，交由本插件进行稳定的阶梯分块裁剪)*
+> *(注：建议同时在该界面的「更多配置」中，将最大上下文轮数 `max_turns` 设置为 `-1` 或调大，交由本插件进行稳定的阶梯分块裁剪)*
 
 ---
 
