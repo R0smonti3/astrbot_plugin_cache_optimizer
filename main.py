@@ -9,12 +9,14 @@ from astrbot.api.star import Context, Star
 
 
 def _is_valid_user_message(msg: Any) -> bool:
-    """检查是否为合法的普通 User 消息边界（排除 tool_call_id 等特殊结构）。"""
+    """检查是否为合法的普通 User 消息边界（排除 tool_call_id 与 _no_save 预设对话等特殊结构）。"""
     if not isinstance(msg, dict):
         return False
     if msg.get("role") != "user":
         return False
     if msg.get("tool_call_id"):
+        return False
+    if msg.get("_no_save"):
         return False
     return True
 
@@ -27,13 +29,13 @@ class CacheOptimizerPlugin(Star):
        杜绝工具调用事务被截断导致的 400 报错；
     3. 真实 Token 账单监控：监听 on_llm_response，直接读取 DeepSeek 服务端返回的真实 input_cached 与 input_other，
        统计最终 LLM 请求的真实加权缓存命中率；
-    4. 自动放宽框架上限：自检会话运行时 max_turns 配置，防止原生滑动窗口提前淘汰历史。
+    4. 框架配置自检警告：检测会话运行时 max_turns 配置，提醒用户将原生 max_turns 设为 -1，防止原生滑动窗口提前淘汰历史。
     """
 
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
         self.config = config if config is not None else {}
-        self._patched_umos: set[str] = set()
+        self._checked_umos: set[str] = set()
         self._stats = {
             "total_requests": 0,
             "eviction_count": 0,
@@ -55,9 +57,6 @@ class CacheOptimizerPlugin(Star):
     def _step_turns(self) -> int:
         return max(1, int(self.config.get("step_turns", 12)))
 
-    def _auto_patch_enabled(self) -> bool:
-        return bool(self.config.get("auto_patch_framework_config", True))
-
     def _debug_log_enabled(self) -> bool:
         return bool(self.config.get("debug_log", False))
 
@@ -66,9 +65,9 @@ class CacheOptimizerPlugin(Star):
     # ------------------------------------------------------------------
     def _check_and_patch_framework_config(self, umo: str | None = None) -> None:
         umo_key = str(umo or "global")
-        if umo_key in self._patched_umos:
+        if umo_key in self._checked_umos:
             return
-        self._patched_umos.add(umo_key)
+        self._checked_umos.add(umo_key)
 
         try:
             cfg = self.context.get_config(umo=umo)
@@ -90,18 +89,10 @@ class CacheOptimizerPlugin(Star):
             threshold_turns = self._low_watermark_turns() + self._step_turns()
 
             if 0 < max_turns <= threshold_turns:
-                if self._auto_patch_enabled():
-                    suggested_max = threshold_turns + 40
-                    compression["max_turns"] = suggested_max
-                    logger.warning(
-                        f"[CacheOptimizer] [警告] 检测到 AstrBot 原生 max_turns={max_turns} 小于等于插件清理门槛({threshold_turns}轮)！"
-                        f"已自动在会话 [{umo_key}] 内存中调大至 {suggested_max} 轮，防止原生滑动窗口提前 popleft 击穿 Prefix Cache。"
-                    )
-                else:
-                    logger.warning(
-                        f"[CacheOptimizer] [警告] AstrBot 原生 max_turns={max_turns} 小于等于插件清理门槛({threshold_turns}轮)！"
-                        f"原生滑动窗口将在插件触发前抢先逐轮淘汰历史，导致阶梯式缓存失效。建议在 WebUI 将上下文轮数上限调大或开启自动修复。"
-                    )
+                logger.warning(
+                    f"[CacheOptimizer] [警告] 检测到 AstrBot 原生 max_turns={max_turns} 小于等于插件清理门槛({threshold_turns}轮)！"
+                    f"原生滑动窗口将在插件触发前逐轮淘汰历史，导致阶梯式缓存失效。建议在 WebUI 会话设置中将原生 max_turns 设为 -1 (不限轮数) 或调大。"
+                )
 
             strategy = compression.get("overflow_strategy", "")
             if strategy == "llm_compress":
@@ -232,7 +223,7 @@ class CacheOptimizerPlugin(Star):
             f"清理步长 (S): {self._step_turns()} 轮 (历史满 {threshold} 轮触发裁剪)\n"
             f"历史裁剪触发: {eviction_count} 次 (累计淘汰 {evicted_user_turns} 轮旧历史)\n"
             f"累计拦截请求: {total_reqs} 次\n"
-            f"已防护会话数: {len(self._patched_umos)} 个\n"
+            f"已检查会话数: {len(self._checked_umos)} 个\n"
             f"---------------------------------\n"
             f"【最终 LLM 请求缓存统计 (DeepSeek Usage)】\n"
             f"命中缓存 Tokens: {cached_tokens:,}\n"

@@ -17,12 +17,6 @@
     "type": "int",
     "default": 12
   },
-  "auto_patch_framework_config": {
-    "description": "自动放宽框架历史轮数",
-    "hint": "若 AstrBot 原生设置的会话轮数上限小于清理门槛 (L + S)，自动在运行时调大，避免框架提前逐轮删消息导致本插件失效。推荐开启。",
-    "type": "bool",
-    "default": true
-  },
   "debug_log": {
     "description": "输出调试日志",
     "hint": "开启后在终端输出每次请求的保留轮数与切片情况，用于排查效果。日常使用建议关闭。",
