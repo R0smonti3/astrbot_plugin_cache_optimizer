@@ -66,11 +66,11 @@
 ## 🤖 AI 编程声明
 
 - 本项目由人类开发者提出需求与架构规范，深度协同 **Google DeepMind Antigravity (Gemini)** 结对编写完成；
-- 所有核心逻辑、阶梯裁剪边界、Persona 预设对话保留与角色对齐机制均通过针对性本地单元测试，测试用例随仓库包含在 [tests/test_optimizer.py](tests/test_optimizer.py) 中供复核。
+- 所有核心逻辑、阶梯裁剪边界、Persona 预设对话保留与角色对齐机制均通过针对性本地单元测试，测试用例随仓库包含在 [tests/test_optimizer.py](https://github.com/R0smonti3/astrbot_plugin_cache_optimizer/blob/main/tests/test_optimizer.py) 中供复核。
 
 ---
 
 ## 📄 开源协议
 
-本项目基于 [MIT License](LICENSE) 协议开源。
+本项目基于 [MIT License](https://github.com/R0smonti3/astrbot_plugin_cache_optimizer/blob/main/LICENSE) 协议开源。
 您可以自由使用、修改和分发，但请保留原作者版权声明及许可声明。
