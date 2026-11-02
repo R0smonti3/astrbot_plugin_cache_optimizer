@@ -14,17 +14,20 @@ from main import CacheOptimizerPlugin, _is_valid_user_message
 
 
 class DummyContext:
-    def __init__(self, max_turns: int = -1, strategy: str = "truncate_by_turns"):
-        self._cfg = {
-            "agent_runner": {
-                "config": {
-                    "compression": {
-                        "max_turns": max_turns,
-                        "overflow_strategy": strategy,
+    def __init__(self, max_turns: int = -1, strategy: str = "truncate_by_turns", raw_cfg: dict | None = None):
+        if raw_cfg is not None:
+            self._cfg = raw_cfg
+        else:
+            self._cfg = {
+                "agent_runner": {
+                    "config": {
+                        "compression": {
+                            "max_turns": max_turns,
+                            "overflow_strategy": strategy,
+                        }
                     }
                 }
             }
-        }
 
     def get_config(self, umo=None):
         return self._cfg
@@ -135,13 +138,14 @@ class TestCacheOptimizer(unittest.TestCase):
         self.assertEqual(post_counted_user, L)
 
     def test_multi_tool_calls_transaction_boundary(self):
-        """场景 3：一轮包含多个 Tool Calls 时仍按 1 轮计算且切口无孤立 Tool 消息"""
+        """场景 3：一轮包含多个连续 Tool Calls 复合调用时仍按 1 轮计算且切口无孤立 Tool 消息"""
         L = 10
 
         complex_contexts: list[dict] = []
         for turn in range(1, 25):
             complex_contexts.append({"role": "user", "content": f"complex_task_{turn}"})
             if turn % 3 == 0:
+                # 恢复包含连续 2 组 Tool Call 的复杂多工具事务链路
                 complex_contexts.append({
                     "role": "assistant",
                     "content": None,
@@ -151,6 +155,16 @@ class TestCacheOptimizer(unittest.TestCase):
                     "role": "tool",
                     "tool_call_id": f"call_{turn}_1",
                     "content": f"result_{turn}_1",
+                })
+                complex_contexts.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{"id": f"call_{turn}_2", "function": {"name": "calc"}}],
+                })
+                complex_contexts.append({
+                    "role": "tool",
+                    "tool_call_id": f"call_{turn}_2",
+                    "content": f"result_{turn}_2",
                 })
                 complex_contexts.append({
                     "role": "assistant",
@@ -188,20 +202,29 @@ class TestCacheOptimizer(unittest.TestCase):
         self.assertEqual(self.plugin._stats["response_count"], 2)
 
     def test_framework_config_health_diagnostics(self):
-        """场景 5：框架配置冲突实时诊断"""
-        # 1. 冲突情况：max_turns=12 <= 16 轮门槛，且 strategy=llm_compress
+        """场景 5：框架配置冲突实时诊断（三态校验：warning / healthy / unknown）"""
+        # 1. 冲突状态 (warning)：max_turns=12 <= 16 轮门槛，且 strategy=llm_compress
         conflict_ctx = DummyContext(max_turns=12, strategy="llm_compress")
         plugin_conflict = CacheOptimizerPlugin(conflict_ctx, {"low_watermark_turns": 10, "step_turns": 6})
-        warnings = plugin_conflict._diagnose_framework_config("test_umo")
+        status, warnings = plugin_conflict._diagnose_framework_config("test_umo")
+        self.assertEqual(status, "warning")
         self.assertEqual(len(warnings), 2)
         self.assertTrue(any("max_turns=12" in w for w in warnings))
         self.assertTrue(any("llm_compress" in w for w in warnings))
 
-        # 2. 健康情况：max_turns=-1，strategy=truncate_by_turns
+        # 2. 健康状态 (healthy)：max_turns=-1，strategy=truncate_by_turns
         healthy_ctx = DummyContext(max_turns=-1, strategy="truncate_by_turns")
         plugin_healthy = CacheOptimizerPlugin(healthy_ctx, {"low_watermark_turns": 10, "step_turns": 6})
-        no_warnings = plugin_healthy._diagnose_framework_config("test_umo")
+        status, no_warnings = plugin_healthy._diagnose_framework_config("test_umo")
+        self.assertEqual(status, "healthy")
         self.assertEqual(len(no_warnings), 0)
+
+        # 3. 未知状态 (unknown)：无法获取有效配置
+        empty_ctx = DummyContext(raw_cfg={})
+        plugin_empty = CacheOptimizerPlugin(empty_ctx, {"low_watermark_turns": 10, "step_turns": 6})
+        status, unknown_msgs = plugin_empty._diagnose_framework_config("test_umo")
+        self.assertEqual(status, "unknown")
+        self.assertTrue(any("无法读取" in m or "未配置" in m for m in unknown_msgs))
 
 
 if __name__ == "__main__":

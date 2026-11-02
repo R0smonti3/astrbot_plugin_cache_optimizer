@@ -63,23 +63,29 @@ class CacheOptimizerPlugin(Star):
     # ------------------------------------------------------------------
     # 框架原生配置诊断（支持实时检查与会话按需查询）
     # ------------------------------------------------------------------
-    def _diagnose_framework_config(self, umo: str | None = None) -> list[str]:
-        warnings: list[str] = []
+    def _diagnose_framework_config(self, umo: str | None = None) -> tuple[str, list[str]]:
+        """实时检查指定会话的 AstrBot 框架配置冲突并返回 (状态, 描述列表)。
+        状态返回：
+        - "warning": 存在配置冲突风险
+        - "healthy": 成功读取且无配置冲突
+        - "unknown": 无法读取当前会话配置
+        """
         try:
             cfg = self.context.get_config(umo=umo)
             if not cfg or not isinstance(cfg, dict):
-                return warnings
+                return "unknown", ["无法读取当前会话的框架配置，暂时无法确认是否存在冲突。"]
 
             agent_runner = cfg.get("agent_runner")
             if not isinstance(agent_runner, dict):
-                return warnings
+                return "unknown", ["当前会话未配置 agent_runner，暂时无法确认是否存在冲突。"]
             runner_config = agent_runner.get("config")
             if not isinstance(runner_config, dict):
-                return warnings
+                return "unknown", ["当前会话 agent_runner 缺少有效 config，暂时无法确认是否存在冲突。"]
             compression = runner_config.get("compression")
             if not isinstance(compression, dict):
-                return warnings
+                return "unknown", ["当前会话未启用或未定义 compression 上下文配置。"]
 
+            warnings: list[str] = []
             max_turns = compression.get("max_turns", -1)
             threshold_turns = self._low_watermark_turns() + self._step_turns()
 
@@ -92,22 +98,27 @@ class CacheOptimizerPlugin(Star):
             strategy = compression.get("overflow_strategy", "")
             if strategy == "llm_compress":
                 warnings.append(
-                    "原生会话溢出策略为 'llm_compress' (LLM摘要压缩)。"
-                    "满额时会重写历史彻底击穿缓存，强烈建议在 WebUI 会话设置中将溢出策略调整为 'truncate_by_turns'。"
+                    "原生溢出策略为 'llm_compress' (LLM摘要压缩)。"
+                    "发生上下文 Token 溢出时，框架可能调用模型压缩并重写历史，影响前缀缓存连续性。建议在 WebUI 会话设置中调整为 'truncate_by_turns'。"
                 )
+
+            if warnings:
+                return "warning", warnings
+            return "healthy", []
         except Exception as exc:
             logger.debug(f"[CacheOptimizer] 框架配置检测跳过: {exc}")
-        return warnings
+            return "unknown", [f"读取会话框架配置发生异常 ({exc})，暂时无法确认冲突。"]
 
-    def _check_and_patch_framework_config(self, umo: str | None = None) -> None:
+    def _check_framework_config(self, umo: str | None = None) -> None:
         umo_key = str(umo or "global")
         if umo_key in self._checked_umos:
             return
         self._checked_umos.add(umo_key)
 
-        warnings = self._diagnose_framework_config(umo)
-        for w in warnings:
-            logger.warning(f"[CacheOptimizer] [警告] {w}")
+        status, warnings = self._diagnose_framework_config(umo)
+        if status == "warning":
+            for w in warnings:
+                logger.warning(f"[CacheOptimizer] [警告] {w}")
 
     # ------------------------------------------------------------------
     # 核心拦截入口：发车前历史分块裁剪 (priority=-9999)
@@ -119,7 +130,7 @@ class CacheOptimizerPlugin(Star):
 
         self._stats["total_requests"] += 1
         umo = event.unified_msg_origin
-        self._check_and_patch_framework_config(umo)
+        self._check_framework_config(umo)
 
         # 核心：阶梯式历史裁剪（随 AstrBot 正常流程写回数据库）
         self._apply_chunked_eviction(req, umo)
@@ -231,11 +242,13 @@ class CacheOptimizerPlugin(Star):
         threshold = self._low_watermark_turns() + self._step_turns()
 
         # 实时检测当前会话的框架配置健康状态
-        diag_warnings = self._diagnose_framework_config(getattr(event, "unified_msg_origin", None))
-        if diag_warnings:
-            diag_str = "【配置健康诊断】⚠️ 检测到配置风险：\n" + "\n".join(f"- {w}" for w in diag_warnings)
-        else:
+        status, diag_msgs = self._diagnose_framework_config(getattr(event, "unified_msg_origin", None))
+        if status == "warning":
+            diag_str = "【配置健康诊断】⚠️ 检测到配置风险：\n" + "\n".join(f"- {w}" for w in diag_msgs)
+        elif status == "healthy":
             diag_str = "【配置健康诊断】🟢 当前会话框架配置无冲突"
+        else:
+            diag_str = f"【配置健康诊断】⚪ {' '.join(diag_msgs)}"
 
         msg = (
             f"=== 提示词缓存保活运行状态 ===\n"
