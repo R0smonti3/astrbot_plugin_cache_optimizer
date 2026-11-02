@@ -7,9 +7,9 @@ desc: >-
   本插件通过以下机制帮助模型更稳定地复用缓存：
   1. 阶梯式历史裁剪：严格以合法的普通用户发言轮数进行计数，历史累计满 L + S 轮（当前轮为第 L + S + 1 轮）时集中裁剪至保留最近 L 轮，代替原生每轮滑动的淘汰机制；裁剪结果随正常流程持久化到数据库；
   2. 严格事务边界对齐：裁剪起点锁定在完整 User 消息边界，完整保留后续工具调用链路，杜绝孤立 Tool 消息导致接口 400 报错；
-  3. 真实账单监控：直接读取大模型服务端返回的真实 input_cached 与 input_other，准确统计最终请求的加权缓存命中率。
-help: 后台自动生效，无需特殊配置。管理员发送 /cache_opt 可查看请求优化与真实 Token 统计。
-version: 1.0.0
+  3. 真实账单监控与配置健康诊断：直接读取大模型服务端返回的真实 input_cached 与 input_other，准确统计加权缓存命中率，并实时诊断原生框架配置冲突。
+help: 后台自动生效，无需特殊配置。管理员发送 /cache_opt 可查看请求优化、配置诊断与真实 Token 统计。
+version: 1.0.1
 author: R0smonti3
 repo: https://github.com/R0smonti3/astrbot_plugin_cache_optimizer
 license: MIT

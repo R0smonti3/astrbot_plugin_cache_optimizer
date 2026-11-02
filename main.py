@@ -52,57 +52,62 @@ class CacheOptimizerPlugin(Star):
         return bool(self.config.get("enabled", True))
 
     def _low_watermark_turns(self) -> int:
-        return max(1, int(self.config.get("low_watermark_turns", 18)))
+        return max(1, int(self.config.get("low_watermark_turns", 10)))
 
     def _step_turns(self) -> int:
-        return max(1, int(self.config.get("step_turns", 12)))
+        return max(1, int(self.config.get("step_turns", 6)))
 
     def _debug_log_enabled(self) -> bool:
         return bool(self.config.get("debug_log", False))
 
     # ------------------------------------------------------------------
-    # 框架原生配置自检与热修复（按 umo 记录）
+    # 框架原生配置诊断（支持实时检查与会话按需查询）
     # ------------------------------------------------------------------
+    def _diagnose_framework_config(self, umo: str | None = None) -> list[str]:
+        warnings: list[str] = []
+        try:
+            cfg = self.context.get_config(umo=umo)
+            if not cfg or not isinstance(cfg, dict):
+                return warnings
+
+            agent_runner = cfg.get("agent_runner")
+            if not isinstance(agent_runner, dict):
+                return warnings
+            runner_config = agent_runner.get("config")
+            if not isinstance(runner_config, dict):
+                return warnings
+            compression = runner_config.get("compression")
+            if not isinstance(compression, dict):
+                return warnings
+
+            max_turns = compression.get("max_turns", -1)
+            threshold_turns = self._low_watermark_turns() + self._step_turns()
+
+            if 0 < max_turns <= threshold_turns:
+                warnings.append(
+                    f"原生 max_turns={max_turns} <= 插件门槛({threshold_turns}轮)。"
+                    f"框架会在插件触发前抢先淘汰历史，建议在 WebUI 会话设置中将 max_turns 设为 -1 (不限轮数) 或调大。"
+                )
+
+            strategy = compression.get("overflow_strategy", "")
+            if strategy == "llm_compress":
+                warnings.append(
+                    "原生会话溢出策略为 'llm_compress' (LLM摘要压缩)。"
+                    "满额时会重写历史彻底击穿缓存，强烈建议在 WebUI 会话设置中将溢出策略调整为 'truncate_by_turns'。"
+                )
+        except Exception as exc:
+            logger.debug(f"[CacheOptimizer] 框架配置检测跳过: {exc}")
+        return warnings
+
     def _check_and_patch_framework_config(self, umo: str | None = None) -> None:
         umo_key = str(umo or "global")
         if umo_key in self._checked_umos:
             return
         self._checked_umos.add(umo_key)
 
-        try:
-            cfg = self.context.get_config(umo=umo)
-            if not cfg:
-                return
-
-            agent_runner = cfg.get("agent_runner")
-            if not isinstance(agent_runner, dict):
-                return
-            runner_config = agent_runner.get("config")
-            if not isinstance(runner_config, dict):
-                return
-            compression = runner_config.get("compression")
-            if not isinstance(compression, dict):
-                return
-
-            max_turns = compression.get("max_turns", -1)
-            # 插件触发阈值为历史满 L + S 轮
-            threshold_turns = self._low_watermark_turns() + self._step_turns()
-
-            if 0 < max_turns <= threshold_turns:
-                logger.warning(
-                    f"[CacheOptimizer] [警告] 检测到 AstrBot 原生 max_turns={max_turns} 小于等于插件清理门槛({threshold_turns}轮)！"
-                    f"原生滑动窗口将在插件触发前逐轮淘汰历史，导致阶梯式缓存失效。建议在 WebUI 会话设置中将原生 max_turns 设为 -1 (不限轮数) 或调大。"
-                )
-
-            strategy = compression.get("overflow_strategy", "")
-            if strategy == "llm_compress":
-                logger.warning(
-                    "[CacheOptimizer] [警告] 检测到 AstrBot 原生会话溢出策略为 'llm_compress' (LLM摘要压缩)！"
-                    "该策略在满额时会调用额外模型重写历史，彻底粉碎后续所有请求的 Prefix Cache。"
-                    "强烈建议在 WebUI 的会话设置中将溢出策略调整为 'truncate_by_turns'。"
-                )
-        except Exception as exc:
-            logger.debug(f"[CacheOptimizer] 框架配置检测跳过: {exc}")
+        warnings = self._diagnose_framework_config(umo)
+        for w in warnings:
+            logger.warning(f"[CacheOptimizer] [警告] {w}")
 
     # ------------------------------------------------------------------
     # 核心拦截入口：发车前历史分块裁剪 (priority=-9999)
@@ -224,14 +229,24 @@ class CacheOptimizerPlugin(Star):
             hit_rate_str = "暂无数据"
 
         threshold = self._low_watermark_turns() + self._step_turns()
+
+        # 实时检测当前会话的框架配置健康状态
+        diag_warnings = self._diagnose_framework_config(getattr(event, "unified_msg_origin", None))
+        if diag_warnings:
+            diag_str = "【配置健康诊断】⚠️ 检测到配置风险：\n" + "\n".join(f"- {w}" for w in diag_warnings)
+        else:
+            diag_str = "【配置健康诊断】🟢 当前会话框架配置无冲突"
+
         msg = (
             f"=== 提示词缓存保活运行状态 ===\n"
             f"运行状态: {'🟢 正常生效中' if self._is_enabled() else '🔴 已停用'}\n"
             f"保留轮数 (L): {self._low_watermark_turns()} 轮\n"
             f"清理步长 (S): {self._step_turns()} 轮 (历史满 {threshold} 轮触发裁剪)\n"
             f"历史裁剪触发: {eviction_count} 次 (累计淘汰 {evicted_user_turns} 轮旧历史)\n"
-            f"累计拦截请求: {total_reqs} 次\n"
+            f"全局累计处理 LLM 请求: {total_reqs} 次 (不代表单会话轮数)\n"
             f"已检查会话数: {len(self._checked_umos)} 个\n"
+            f"---------------------------------\n"
+            f"{diag_str}\n"
             f"---------------------------------\n"
             f"【最终 LLM 请求缓存统计 (DeepSeek Usage)】\n"
             f"命中缓存 Tokens: {cached_tokens:,}\n"
