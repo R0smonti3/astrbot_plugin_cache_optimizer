@@ -47,8 +47,20 @@
 | **清理步长 (`step_turns`)** | `6` | 多聊多少轮才集中修剪一次。当历史中的合法 User 消息数达到 L + S 轮（当前为第 L + S + 1 轮）时触发裁剪。默认 6 轮（至少为 1 轮） |
 | **输出调试日志 (`debug_log`)** | `false` | 在后台终端打印每次请求的保留轮数与切片细节，日常使用建议关闭 |
 
-> [!TIP]
-> 建议在 AstrBot WebUI 的【会话设置】中将上下文轮数上限 `max_turns` 设置为 `-1`（不限轮数），并将溢出策略设为 `truncate_by_turns`。这能避免框架原生滑动窗口提前逐轮丢弃消息或因摘要压缩打碎前缀缓存。
+> [!IMPORTANT]
+> ### 关键配置指引：务必将原生「压缩策略」选为「按对话轮数截断」
+> AstrBot 原生默认的溢出策略为 `llm_compress`（AI 摘要压缩）。当上下文较长时，框架可能调用模型重写历史为一段前情提要，导致前缀缓存被彻底粉碎。
+> 
+> **强烈建议按以下路径调整**：
+> 1. 打开 WebUI 导航栏的 **「AI」** $\rightarrow$ **「AstrBot 内置 AI」**；
+> 2. 切换到 **「高级」** 标签页 $\rightarrow$ 找到 **「上下文管理策略」**；
+> 3. 将 **「压缩策略」** 下拉框切换为 **「按对话轮数截断」**（即 `truncate_by_turns`）并保存。
+> 
+> <p align="center">
+>   <img src="https://raw.githubusercontent.com/R0smonti3/astrbot_plugin_cache_optimizer/main/docs/config_truncate.png" width="700" alt="配置图解">
+> </p>
+> 
+> *(注：同时建议在该界面的更多配置中，将最大上下文轮数 `max_turns` 设置为 `-1` 或调大，交由本插件进行稳定的阶梯分块裁剪)*
 
 ---
 
