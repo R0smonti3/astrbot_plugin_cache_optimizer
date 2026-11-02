@@ -1,6 +1,8 @@
-# 提高缓存命中 (astrbot_plugin_cache_optimizer)
-
-减少对话上下文的频繁滑动，提升 DeepSeek、Kimi 等大模型的前缀缓存（Prefix Cache）命中率，直接降低 API 费用并提升响应速度。
+<div align="center">
+  <img src="https://raw.githubusercontent.com/R0smonti3/astrbot_plugin_cache_optimizer/main/logo.png" width="180" height="180" alt="CacheOptimizer Logo">
+  <h1>提高缓存命中 (astrbot_plugin_cache_optimizer)</h1>
+  <p>减少对话上下文的频繁滑动，提升 DeepSeek、Kimi 等大模型的前缀缓存（Prefix Cache）命中率，直接降低 API 费用并提升响应速度。</p>
+</div>
 
 ---
 
