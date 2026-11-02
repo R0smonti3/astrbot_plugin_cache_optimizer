@@ -158,10 +158,18 @@ class CacheOptimizerPlugin(Star):
             )
             return
 
-        # 5. 执行切片：保留最近 L 条历史 User 消息及其附属的全部 Assistant、Tool 消息
-        # 裁剪后的消息将随 AstrBot 正常流程写回数据库
+        # 5. 提取开头连续的 Persona 预设对话 (_no_save=True)，确保当轮请求人设完整且缓存前缀稳定
+        prefix_no_save: list[dict] = []
+        for msg in contexts:
+            if isinstance(msg, dict) and msg.get("_no_save"):
+                prefix_no_save.append(msg)
+            else:
+                break
+
+        # 6. 执行切片：保留预设前缀 + 最近 L 条历史 User 消息及其附属的全部 Assistant、Tool 消息
+        # 裁剪后的普通消息随 AstrBot 正常流程写回数据库，_no_save 消息框架自动跳过不入库
         evicted_turns = total_user_turns - L
-        contexts[:] = contexts[cut_idx:]
+        contexts[:] = prefix_no_save + contexts[cut_idx:]
         self._stats["eviction_count"] += 1
         self._stats["evicted_user_turns"] += evicted_turns
 
