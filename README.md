@@ -6,6 +6,22 @@
 
 ---
 
+> [!IMPORTANT]
+> ### 必看前置配置：将原生「压缩策略」选为「按对话轮数截断」
+> AstrBot 原生默认的溢出策略为 `llm_compress`（由 LLM 压缩上下文）。当上下文较长时，框架可能调用额外模型将历史重写为一段摘要，导致已建立的前缀缓存被彻底粉碎。
+> 
+> **只需一次简单设置**：
+> 1. 打开 WebUI 左侧导航栏的 **「配置文件」**；
+> 2. 点击进入 **「AI」** → 点击 **「AstrBot 内置 AI」**；
+> 3. 在上方切换到 **「高级」** 标签页 → 找到 **「上下文管理策略」** 区域；
+> 4. 将 **「压缩策略」** 下拉框由原先的“由 LLM 压缩上下文”切换为 **「按对话轮数截断」** 并保存。
+> 
+> <p align="center">
+>   <img src="https://raw.githubusercontent.com/R0smonti3/astrbot_plugin_cache_optimizer/main/docs/config_truncate.png" width="850" alt="配置图解">
+> </p>
+
+---
+
 ## 插件有什么用？
 
 目前许多主流大模型（如 DeepSeek、Kimi、Claude 等）都支持**提示词前缀缓存（Prefix Cache）**机制：
@@ -32,7 +48,7 @@
 3. **真实账单级 Token 统计与实时配置诊断**
    - 直接监听大模型响应事件，读取 DeepSeek 等服务商原生返回的 `usage.input_cached`（命中 Token）与 `usage.input_other`（未命中 Token）；
    - 计算加权真实缓存命中率，数据完全真实，杜绝本地猜测与估算；
-   - 实时诊断 AstrBot 原生 `max_turns` 与溢出策略冲突，保障插件正常接管。
+   - 实时诊断 AstrBot 原生配置冲突，保障插件正常接管。
 
 ---
 
@@ -47,21 +63,8 @@
 | **清理步长 (`step_turns`)** | `6` | 多聊多少轮才集中修剪一次。当历史中的合法 User 消息数达到 L + S 轮（当前为第 L + S + 1 轮）时触发裁剪。默认 6 轮（至少为 1 轮） |
 | **输出调试日志 (`debug_log`)** | `false` | 在后台终端打印每次请求的保留轮数与切片细节，日常使用建议关闭 |
 
-> [!IMPORTANT]
-> ### 关键配置指引：务必将原生「压缩策略」选为「按对话轮数截断」
-> AstrBot 原生默认的溢出策略为 `llm_compress`（由 LLM 压缩上下文）。当上下文较长时，框架可能调用额外模型将历史重写为一段摘要，导致已建立的前缀缓存被彻底粉碎。
-> 
-> **操作路径**：
-> 1. 打开 WebUI 左侧导航栏的 **「配置文件」**；
-> 2. 点击进入 **「AI」** → 点击 **「AstrBot 内置 AI」**；
-> 3. 在上方切换到 **「高级」** 标签页 → 找到 **「上下文管理策略」** 区域；
-> 4. 将 **「压缩策略」** 下拉框由原先的“由 LLM 压缩上下文”切换为 **「按对话轮数截断」**（对应 `truncate_by_turns`）并保存。
-> 
-> <p align="center">
->   <img src="https://raw.githubusercontent.com/R0smonti3/astrbot_plugin_cache_optimizer/main/docs/config_truncate.png" width="850" alt="配置图解">
-> </p>
-> 
-> *(注：建议同时在该界面的「更多配置」中，将最大上下文轮数 `max_turns` 设置为 `-1` 或调大，交由本插件进行稳定的阶梯分块裁剪)*
+> [!NOTE]
+> 若自行调大保留轮数或步长，请注意 $L + S$ 的总和不要大于你在 AstrBot 原生设置的最大上下文轮数（原生默认通常为 20 轮），否则原生滑动窗口会在插件触发前抢先逐轮删消息。
 
 ---
 
