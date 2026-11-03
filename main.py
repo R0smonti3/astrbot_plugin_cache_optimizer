@@ -89,11 +89,17 @@ class CacheOptimizerPlugin(Star):
             max_turns = compression.get("max_turns", -1)
             threshold_turns = self._low_watermark_turns() + self._step_turns()
 
-            if 0 < max_turns <= threshold_turns:
-                warnings.append(
-                    f"原生 max_turns={max_turns} <= 插件门槛({threshold_turns}轮)。"
-                    f"框架会在插件触发前抢先淘汰历史，建议在 WebUI 会话设置中将 max_turns 设为 -1 (不限轮数) 或调大。"
-                )
+            if max_turns > 0:
+                if max_turns <= threshold_turns:
+                    warnings.append(
+                        f"原生 max_turns={max_turns} <= 插件门槛({threshold_turns}轮)。"
+                        f"框架会在插件触发前抢先淘汰历史，强烈建议在 WebUI 会话设置中将 max_turns 设为 -1 (不限轮数)。"
+                    )
+                else:
+                    warnings.append(
+                        f"原生 max_turns={max_turns} (有限轮数配置)。"
+                        f"AstrBot 原生截断按非系统消息总数折半折算轮次(len//2)，当工具调用产生多条消息时可能抢先触发截断破坏前缀缓存。建议在 WebUI 会话设置中将 max_turns 设为 -1 (不限轮数)。"
+                    )
 
             strategy = compression.get("overflow_strategy", "")
             if strategy == "llm_compress":

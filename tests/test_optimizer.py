@@ -212,6 +212,13 @@ class TestCacheOptimizer(unittest.TestCase):
         self.assertTrue(any("max_turns=12" in w for w in warnings))
         self.assertTrue(any("llm_compress" in w for w in warnings))
 
+        # 1.2 有限轮数但大于门槛 (warning)：max_turns=20 > 16 轮门槛
+        finite_ctx = DummyContext(max_turns=20, strategy="truncate_by_turns")
+        plugin_finite = CacheOptimizerPlugin(finite_ctx, {"low_watermark_turns": 10, "step_turns": 6})
+        status_finite, warnings_finite = plugin_finite._diagnose_framework_config("test_umo")
+        self.assertEqual(status_finite, "warning")
+        self.assertTrue(any("max_turns=20" in w and "有限轮数" in w for w in warnings_finite))
+
         # 2. 健康状态 (healthy)：max_turns=-1，strategy=truncate_by_turns
         healthy_ctx = DummyContext(max_turns=-1, strategy="truncate_by_turns")
         plugin_healthy = CacheOptimizerPlugin(healthy_ctx, {"low_watermark_turns": 10, "step_turns": 6})
