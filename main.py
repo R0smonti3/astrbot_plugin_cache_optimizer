@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any
 
 from astrbot.api import logger
@@ -21,15 +22,65 @@ def _is_valid_user_message(msg: Any) -> bool:
     return True
 
 
+def _extract_usage_tokens(usage: Any) -> tuple[int, int]:
+    """统一提取多模型厂商的 (cached_tokens, uncached_tokens)。
+    支持 DeepSeek, OpenAI, Claude, Gemini 以及字典或对象。
+    """
+    if not usage:
+        return 0, 0
+    get = lambda k: usage.get(k, 0) if isinstance(usage, dict) else getattr(usage, k, 0)
+
+    # 1. DeepSeek 规范 (input_cached, input_other)
+    c = get("input_cached")
+    o = get("input_other")
+    if c or o:
+        return int(c or 0), int(o or 0)
+
+    # 2. OpenAI 规范 (prompt_tokens_details.cached_tokens)
+    pt = get("prompt_tokens") or get("prompt_token_count") or get("input_tokens") or 0
+    details = get("prompt_tokens_details")
+    if details:
+        det_get = lambda k: details.get(k, 0) if isinstance(details, dict) else getattr(details, k, 0)
+        c = det_get("cached_tokens")
+
+    # 3. Claude / Gemini 规范
+    if not c:
+        c = get("cache_read_input_tokens") or get("cached_content_token_count")
+
+    cached = int(c or 0)
+    total_prompt = int(pt or 0)
+    uncached = max(0, total_prompt - cached) if total_prompt >= cached else 0
+    return cached, uncached
+
+
+_TIMESTAMP_PATTERN = re.compile(
+    r"(?:当前时间|北京时间|系统时间|时间戳|current\s*time)[:：\s]*\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\d{1,2}[:：]\d{1,2}",
+    re.IGNORECASE,
+)
+
+
+def _check_system_prompt_timestamp(system_prompt: str | None) -> list[str]:
+    """检测系统提示词中是否存在秒/分级高频动态时间戳（破坏前缀缓存）。"""
+    if not system_prompt or not isinstance(system_prompt, str):
+        return []
+    if _TIMESTAMP_PATTERN.search(system_prompt):
+        return [
+            "系统提示词 (System Prompt) 中检测到秒/分级动态时间戳。"
+            "根据 KV Cache 前缀缓存原理，提示词前缀只要变动 1 个字符，其后的所有对话上下文缓存将全量击穿失效。"
+            "强烈建议将动态时间戳移至最新用户消息末尾，而不是写在 System Prompt 中。"
+        ]
+    return []
+
+
 class CacheOptimizerPlugin(Star):
     """大模型提示词缓存保活插件 (CacheOptimizer)：
     1. 阶梯式历史裁剪：按合法的普通 User 轮数精准计数，当历史累计满 L + S 轮时触发裁剪，
        一次性修剪至保留最近 L 轮历史，裁剪结果通过 AstrBot 正常 Agent 保存流程持久化写回数据库；
     2. 严格事务边界对齐：裁剪起点锁定在完整 User 消息边界，完整保留其后附属的 Assistant 与 Tool 调用链路，
        杜绝工具调用事务被截断导致的 400 报错；
-    3. 真实 Token 账单监控：监听 on_llm_response，直接读取 DeepSeek 服务端返回的真实 input_cached 与 input_other，
-       统计最终 LLM 请求的真实加权缓存命中率；
-    4. 框架配置自检警告：检测会话运行时 max_turns 配置，提醒用户将原生 max_turns 设为 -1，防止原生滑动窗口提前淘汰历史。
+    3. 多厂商 Token Usage 监控：兼容 DeepSeek、OpenAI、Claude、Gemini 的 Prompt Cache 命中率统计；
+    4. 高频动态时间戳与原生配置冲突诊断：实时检测秒级时间戳击穿前缀与原生 max_turns 截断风险；
+    5. 支持全局与分会话独立查看运行指标 (/cache_opt [here])。
     """
 
     def __init__(self, context: Context, config: dict | None = None) -> None:
@@ -44,6 +95,20 @@ class CacheOptimizerPlugin(Star):
             "total_other_tokens": 0,
             "response_count": 0,
         }
+        self._session_stats: dict[str, dict[str, int]] = {}
+
+    def _get_session_stat(self, umo: str) -> dict[str, int]:
+        if umo not in self._session_stats:
+            if len(self._session_stats) >= 200:
+                self._session_stats.pop(next(iter(self._session_stats)))
+            self._session_stats[umo] = {
+                "requests": 0,
+                "evictions": 0,
+                "evicted_turns": 0,
+                "cached_tokens": 0,
+                "other_tokens": 0,
+            }
+        return self._session_stats[umo]
 
     # ------------------------------------------------------------------
     # 配置读取辅助
@@ -61,67 +126,60 @@ class CacheOptimizerPlugin(Star):
         return bool(self.config.get("debug_log", False))
 
     # ------------------------------------------------------------------
-    # 框架原生配置诊断（支持实时检查与会话按需查询）
+    # 框架原生配置与前缀安全诊断（支持实时检查与会话按需查询）
     # ------------------------------------------------------------------
-    def _diagnose_framework_config(self, umo: str | None = None) -> tuple[str, list[str]]:
-        """实时检查指定会话的 AstrBot 框架配置冲突并返回 (状态, 描述列表)。
-        状态返回：
-        - "warning": 存在配置冲突风险
-        - "healthy": 成功读取且无配置冲突
-        - "unknown": 无法读取当前会话配置
-        """
+    def _diagnose_framework_config(
+        self, umo: str | None = None, system_prompt: str | None = None
+    ) -> tuple[str, list[str]]:
+        """实时检查指定会话的 AstrBot 框架配置冲突并返回 (状态, 描述列表)。"""
+        warnings: list[str] = []
+        if system_prompt:
+            warnings.extend(_check_system_prompt_timestamp(system_prompt))
+
         try:
             cfg = self.context.get_config(umo=umo)
-            if not cfg or not isinstance(cfg, dict):
-                return "unknown", ["无法读取当前会话的框架配置，暂时无法确认是否存在冲突。"]
+            if cfg and isinstance(cfg, dict):
+                agent_runner = cfg.get("agent_runner")
+                if isinstance(agent_runner, dict):
+                    runner_config = agent_runner.get("config")
+                    if isinstance(runner_config, dict):
+                        compression = runner_config.get("compression")
+                        if isinstance(compression, dict):
+                            max_turns = compression.get("max_turns", -1)
+                            threshold_turns = self._low_watermark_turns() + self._step_turns()
 
-            agent_runner = cfg.get("agent_runner")
-            if not isinstance(agent_runner, dict):
-                return "unknown", ["当前会话未配置 agent_runner，暂时无法确认是否存在冲突。"]
-            runner_config = agent_runner.get("config")
-            if not isinstance(runner_config, dict):
-                return "unknown", ["当前会话 agent_runner 缺少有效 config，暂时无法确认是否存在冲突。"]
-            compression = runner_config.get("compression")
-            if not isinstance(compression, dict):
-                return "unknown", ["当前会话未启用或未定义 compression 上下文配置。"]
+                            if max_turns > 0:
+                                if max_turns <= threshold_turns:
+                                    warnings.append(
+                                        f"原生 max_turns={max_turns} <= 插件门槛({threshold_turns}轮)。"
+                                        f"框架会在插件触发前抢先淘汰历史，强烈建议在 WebUI 会话设置中将 max_turns 设为 -1 (不限轮数)。"
+                                    )
+                                else:
+                                    warnings.append(
+                                        f"原生 max_turns={max_turns} (有限轮数配置)。"
+                                        f"AstrBot 原生截断按非系统消息总数折半折算轮次(len//2)，当工具调用产生多条消息时可能抢先触发截断破坏前缀缓存。建议在 WebUI 会话设置中将 max_turns 设为 -1 (不限轮数)。"
+                                    )
 
-            warnings: list[str] = []
-            max_turns = compression.get("max_turns", -1)
-            threshold_turns = self._low_watermark_turns() + self._step_turns()
-
-            if max_turns > 0:
-                if max_turns <= threshold_turns:
-                    warnings.append(
-                        f"原生 max_turns={max_turns} <= 插件门槛({threshold_turns}轮)。"
-                        f"框架会在插件触发前抢先淘汰历史，强烈建议在 WebUI 会话设置中将 max_turns 设为 -1 (不限轮数)。"
-                    )
-                else:
-                    warnings.append(
-                        f"原生 max_turns={max_turns} (有限轮数配置)。"
-                        f"AstrBot 原生截断按非系统消息总数折半折算轮次(len//2)，当工具调用产生多条消息时可能抢先触发截断破坏前缀缓存。建议在 WebUI 会话设置中将 max_turns 设为 -1 (不限轮数)。"
-                    )
-
-            strategy = compression.get("overflow_strategy", "")
-            if strategy == "llm_compress":
-                warnings.append(
-                    "原生溢出策略为 'llm_compress' (LLM摘要压缩)。"
-                    "发生上下文 Token 溢出时，框架可能调用模型压缩并重写历史，影响前缀缓存连续性。建议在 WebUI 会话设置中调整为 'truncate_by_turns'。"
-                )
-
-            if warnings:
-                return "warning", warnings
-            return "healthy", []
+                            strategy = compression.get("overflow_strategy", "")
+                            if strategy == "llm_compress":
+                                warnings.append(
+                                    "原生溢出策略为 'llm_compress' (LLM摘要压缩)。"
+                                    "发生上下文 Token 溢出时，框架可能调用模型压缩并重写历史，影响前缀缓存连续性。建议在 WebUI 会话设置中调整为 'truncate_by_turns'。"
+                                )
         except Exception as exc:
             logger.debug(f"[CacheOptimizer] 框架配置检测跳过: {exc}")
-            return "unknown", [f"读取会话框架配置发生异常 ({exc})，暂时无法确认冲突。"]
 
-    def _check_framework_config(self, umo: str | None = None) -> None:
+        if warnings:
+            return "warning", warnings
+        return "healthy", []
+
+    def _check_framework_config(self, umo: str | None = None, system_prompt: str | None = None) -> None:
         umo_key = str(umo or "global")
         if umo_key in self._checked_umos:
             return
         self._checked_umos.add(umo_key)
 
-        status, warnings = self._diagnose_framework_config(umo)
+        status, warnings = self._diagnose_framework_config(umo, system_prompt)
         if status == "warning":
             for w in warnings:
                 logger.warning(f"[CacheOptimizer] [警告] {w}")
@@ -135,8 +193,9 @@ class CacheOptimizerPlugin(Star):
             return
 
         self._stats["total_requests"] += 1
-        umo = event.unified_msg_origin
-        self._check_framework_config(umo)
+        umo = str(getattr(event, "unified_msg_origin", "") or "default")
+        self._get_session_stat(umo)["requests"] += 1
+        self._check_framework_config(umo, getattr(req, "system_prompt", None))
 
         # 核心：阶梯式历史裁剪（随 AstrBot 正常流程写回数据库）
         self._apply_chunked_eviction(req, umo)
@@ -189,11 +248,16 @@ class CacheOptimizerPlugin(Star):
                 break
 
         # 6. 执行切片：保留预设前缀 + 最近 L 条历史 User 消息及其附属的全部 Assistant、Tool 消息
-        # 裁剪后的普通消息随 AstrBot 正常流程写回数据库，_no_save 消息框架自动跳过不入库
         evicted_turns = total_user_turns - L
         contexts[:] = prefix_no_save + contexts[cut_idx:]
+
         self._stats["eviction_count"] += 1
         self._stats["evicted_user_turns"] += evicted_turns
+
+        if umo:
+            s_stat = self._get_session_stat(umo)
+            s_stat["evictions"] += 1
+            s_stat["evicted_turns"] += evicted_turns
 
         if self._debug_log_enabled():
             logger.debug(
@@ -201,7 +265,7 @@ class CacheOptimizerPlugin(Star):
             )
 
     # ------------------------------------------------------------------
-    # 真实 Token Usage 统计监听 (DeepSeek 原生返回)
+    # 真实 Token Usage 统计监听 (兼容 DeepSeek, OpenAI, Claude, Gemini)
     # ------------------------------------------------------------------
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: Any) -> None:
@@ -209,46 +273,60 @@ class CacheOptimizerPlugin(Star):
             return
 
         usage = getattr(resp, "usage", None)
-        if not usage:
-            return
-
-        cached = getattr(usage, "input_cached", 0)
-        other = getattr(usage, "input_other", 0)
-        cached = int(cached) if isinstance(cached, (int, float)) else 0
-        other = int(other) if isinstance(other, (int, float)) else 0
+        cached, other = _extract_usage_tokens(usage)
 
         if cached > 0 or other > 0:
             self._stats["total_cached_tokens"] += cached
             self._stats["total_other_tokens"] += other
             self._stats["response_count"] += 1
 
+            umo = str(getattr(event, "unified_msg_origin", "") or "default")
+            s_stat = self._get_session_stat(umo)
+            s_stat["cached_tokens"] += cached
+            s_stat["other_tokens"] += other
+
     # ------------------------------------------------------------------
-    # 状态与诊断指令（双重管理员权限保护）
+    # 状态与诊断指令（双重管理员权限保护，支持 /cache_opt here）
     # ------------------------------------------------------------------
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("cache_opt")
-    async def cmd_cache_opt(self, event: AstrMessageEvent) -> None:
-        """查看提示词缓存保活与真实 Token 统计（仅管理员）"""
+    async def cmd_cache_opt(self, event: AstrMessageEvent, target_scope: str = "") -> None:
+        """查看提示词缓存保活与真实 Token 统计（仅管理员，支持 /cache_opt here）"""
         if hasattr(event, "is_admin") and callable(event.is_admin) and not event.is_admin():
             yield event.plain_result("⚠️ 只有管理员可执行此指令。")
             return
 
-        total_reqs = self._stats["total_requests"]
-        eviction_count = self._stats["eviction_count"]
-        evicted_user_turns = self._stats["evicted_user_turns"]
-        cached_tokens = self._stats["total_cached_tokens"]
-        other_tokens = self._stats["total_other_tokens"]
-        total_tokens = cached_tokens + other_tokens
+        scope = target_scope.strip().lower() if target_scope else ""
+        if not scope:
+            msg_str = getattr(event, "message_str", "") or ""
+            if any(w in msg_str.lower() for w in ("here", "当前", "本群")):
+                scope = "here"
 
-        if total_tokens > 0:
-            hit_rate_str = f"{(cached_tokens / total_tokens * 100):.2f}%"
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        is_here = (scope in ("here", "当前", "本群")) and bool(umo)
+
+        if is_here:
+            s_stat = self._get_session_stat(umo)
+            reqs = s_stat["requests"]
+            evictions = s_stat["evictions"]
+            evicted_turns = s_stat["evicted_turns"]
+            cached_tokens = s_stat["cached_tokens"]
+            other_tokens = s_stat["other_tokens"]
+            title_prefix = f"【当前会话独立缓存统计】({umo})"
         else:
-            hit_rate_str = "暂无数据"
+            reqs = self._stats["total_requests"]
+            evictions = self._stats["eviction_count"]
+            evicted_turns = self._stats["evicted_user_turns"]
+            cached_tokens = self._stats["total_cached_tokens"]
+            other_tokens = self._stats["total_other_tokens"]
+            title_prefix = f"【全局累计缓存保活统计】(活跃会话数: {len(self._session_stats)})"
 
+        total_tokens = cached_tokens + other_tokens
+        hit_rate_str = f"{(cached_tokens / total_tokens * 100):.2f}%" if total_tokens > 0 else "暂无数据"
         threshold = self._low_watermark_turns() + self._step_turns()
 
         # 实时检测当前会话的框架配置健康状态
-        status, diag_msgs = self._diagnose_framework_config(getattr(event, "unified_msg_origin", None))
+        status, diag_msgs = self._diagnose_framework_config(umo)
         if status == "warning":
             diag_str = "【配置健康诊断】⚠️ 检测到配置风险：\n" + "\n".join(f"- {w}" for w in diag_msgs)
         elif status == "healthy":
@@ -256,23 +334,27 @@ class CacheOptimizerPlugin(Star):
         else:
             diag_str = f"【配置健康诊断】⚪ {' '.join(diag_msgs)}"
 
+        scope_tip = (
+            "💡 提示：输入 `/cache_opt` 可查看全局总统计"
+            if is_here
+            else "💡 提示：输入 `/cache_opt here` 可查看当前会话的独立缓存统计"
+        )
+
         msg = (
             f"=== 提示词缓存保活运行状态 ===\n"
             f"运行状态: {'🟢 正常生效中' if self._is_enabled() else '🔴 已停用'}\n"
-            f"保留轮数 (L): {self._low_watermark_turns()} 轮\n"
-            f"清理步长 (S): {self._step_turns()} 轮 (历史满 {threshold} 轮触发裁剪)\n"
-            f"历史裁剪触发: {eviction_count} 次 (累计淘汰 {evicted_user_turns} 轮旧历史)\n"
-            f"全局累计处理 LLM 请求: {total_reqs} 次 (不代表单会话轮数)\n"
-            f"已检查会话数: {len(self._checked_umos)} 个\n"
+            f"保留轮数 (L): {self._low_watermark_turns()} 轮 | 清理步长 (S): {self._step_turns()} 轮 (历史满 {threshold} 轮裁剪)\n"
             f"---------------------------------\n"
             f"{diag_str}\n"
             f"---------------------------------\n"
-            f"【最终 LLM 请求缓存统计 (DeepSeek Usage)】\n"
+            f"{title_prefix}\n"
+            f"处理 LLM 请求: {reqs} 次 | 历史裁剪触发: {evictions} 次 (累计淘汰 {evicted_turns} 轮旧历史)\n"
             f"命中缓存 Tokens: {cached_tokens:,}\n"
             f"未命中 Tokens: {other_tokens:,}\n"
             f"总计输入 Tokens: {total_tokens:,}\n"
             f"加权平均命中率: {hit_rate_str}\n"
-            f"注: 该统计来源于模型服务端返回的真实 Usage，反映每次发车的最终请求缓存命中情况。\n"
+            f"---------------------------------\n"
+            f"{scope_tip}\n"
             f"================================="
         )
         yield event.plain_result(msg)

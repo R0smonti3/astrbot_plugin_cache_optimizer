@@ -10,7 +10,7 @@ plugin_root = os.path.dirname(current_dir)
 if plugin_root not in sys.path:
     sys.path.insert(0, plugin_root)
 
-from main import CacheOptimizerPlugin, _is_valid_user_message
+from main import CacheOptimizerPlugin, _is_valid_user_message, _extract_usage_tokens, _check_system_prompt_timestamp
 
 
 class DummyContext:
@@ -232,6 +232,84 @@ class TestCacheOptimizer(unittest.TestCase):
         status, unknown_msgs = plugin_empty._diagnose_framework_config("test_umo")
         self.assertEqual(status, "unknown")
         self.assertTrue(any("无法读取" in m or "未配置" in m for m in unknown_msgs))
+
+    def test_extract_multi_provider_usage_tokens(self):
+        """场景 6：跨厂商 Token Usage 解析兼容测试 (DeepSeek, OpenAI, Claude, Gemini, Dict)"""
+        # 1. DeepSeek (input_cached, input_other)
+        ds_usage = {"input_cached": 1200, "input_other": 300}
+        c, o = _extract_usage_tokens(ds_usage)
+        self.assertEqual((c, o), (1200, 300))
+
+        # 2. OpenAI (prompt_tokens_details.cached_tokens)
+        openai_usage = {
+            "prompt_tokens": 1500,
+            "prompt_tokens_details": {"cached_tokens": 1000},
+        }
+        c, o = _extract_usage_tokens(openai_usage)
+        self.assertEqual((c, o), (1000, 500))
+
+        # 3. Claude (cache_read_input_tokens + input_tokens)
+        claude_usage = {
+            "input_tokens": 2000,
+            "cache_read_input_tokens": 1600,
+        }
+        c, o = _extract_usage_tokens(claude_usage)
+        self.assertEqual((c, o), (1600, 400))
+
+        # 4. Gemini (cached_content_token_count + prompt_token_count)
+        gemini_usage = {
+            "prompt_token_count": 800,
+            "cached_content_token_count": 600,
+        }
+        c, o = _extract_usage_tokens(gemini_usage)
+        self.assertEqual((c, o), (600, 200))
+
+    def test_system_prompt_timestamp_diagnostics(self):
+        """场景 7：系统提示词秒/分级高频动态时间戳击穿缓存诊断"""
+        # 1. 包含动态时间戳（中文格式）
+        bad_sp1 = "你是助手。当前时间：2026-11-06 21:05:00，请回答问题。"
+        w1 = _check_system_prompt_timestamp(bad_sp1)
+        self.assertEqual(len(w1), 1)
+        self.assertTrue("击穿失效" in w1[0])
+
+        # 2. 包含动态时间戳（英文格式）
+        bad_sp2 = "You are a helpful assistant. Current time: 2026/11/06 21:05."
+        w2 = _check_system_prompt_timestamp(bad_sp2)
+        self.assertEqual(len(w2), 1)
+
+        # 3. 正常静态人设（不含时间戳）
+        good_sp = "你是一只猫娘，说话要带喵。"
+        w3 = _check_system_prompt_timestamp(good_sp)
+        self.assertEqual(len(w3), 0)
+
+    def test_session_level_stats_isolation(self):
+        """场景 8：单会话统计隔离验证"""
+        import asyncio
+
+        class DummyEventWithUmo:
+            def __init__(self, umo):
+                self.unified_msg_origin = umo
+
+        e1 = DummyEventWithUmo("session_group_1")
+        e2 = DummyEventWithUmo("session_group_2")
+
+        r1 = DummyResp(cached=1000, other=200)
+        r2 = DummyResp(cached=500, other=500)
+
+        asyncio.run(self.plugin.on_llm_response(e1, r1))
+        asyncio.run(self.plugin.on_llm_response(e2, r2))
+
+        s1 = self.plugin._get_session_stat("session_group_1")
+        s2 = self.plugin._get_session_stat("session_group_2")
+
+        self.assertEqual(s1["cached_tokens"], 1000)
+        self.assertEqual(s1["other_tokens"], 200)
+        self.assertEqual(s2["cached_tokens"], 500)
+        self.assertEqual(s2["other_tokens"], 500)
+
+        # 全局总计仍然正确累加
+        self.assertEqual(self.plugin._stats["total_cached_tokens"], 1500)
+        self.assertEqual(self.plugin._stats["total_other_tokens"], 700)
 
 
 if __name__ == "__main__":
