@@ -10,7 +10,7 @@ desc: >-
   3. 跨厂商账单监控与配置健康诊断：兼容 DeepSeek、OpenAI、Claude、Gemini 的 Prompt Cache 命中率统计，实时诊断原生框架配置冲突与高频动态时间戳击穿前缀风险；
   4. 支持分会话独立查看运行指标：支持 /cache_opt here 独立查看当前群聊统计。
 help: 后台自动生效，无需特殊配置。管理员发送 /cache_opt 可查看全局统计，/cache_opt here 查看当前会话统计。
-version: 1.0.2
+version: 1.0.3
 author: R0smonti3
 repo: https://github.com/R0smonti3/astrbot_plugin_cache_optimizer
 license: MIT
