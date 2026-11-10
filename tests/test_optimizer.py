@@ -311,6 +311,57 @@ class TestCacheOptimizer(unittest.TestCase):
         self.assertEqual(self.plugin._stats["total_cached_tokens"], 1500)
         self.assertEqual(self.plugin._stats["total_other_tokens"], 700)
 
+    def test_eviction_timestamp_and_status_payload(self):
+        """场景 9：上一轮剪切时间记录、Web看板数据导出及 /cache_opt 指令回复校验"""
+        import asyncio
+        from main import _format_eviction_time
+
+        # 1. 初始状态未发生剪切
+        self.assertEqual(_format_eviction_time(0), "暂无剪切记录")
+        init_payload = self.plugin._status_payload()
+        self.assertEqual(init_payload["last_eviction_ts"], 0.0)
+        self.assertEqual(len(init_payload["eviction_logs"]), 0)
+
+        # 2. 构造 16 轮对话触发一次裁剪 (L=10, S=6)
+        contexts = []
+        for i in range(16):
+            contexts.append({"role": "user", "content": f"u{i}"})
+            contexts.append({"role": "assistant", "content": f"a{i}"})
+
+        req = DummyReq(contexts=contexts)
+        self.plugin._apply_chunked_eviction(req, "qq:GroupMessage:123456")
+
+        payload = self.plugin._status_payload()
+        self.assertGreater(payload["last_eviction_ts"], 0)
+        self.assertEqual(payload["last_eviction_turns"], 6)
+        self.assertEqual(payload["last_eviction_umo"], "qq:GroupMessage:123456")
+        self.assertEqual(len(payload["eviction_logs"]), 1)
+        self.assertEqual(payload["sessions"][0]["current_user_turns"], 10)
+        self.assertGreater(payload["sessions"][0]["last_eviction_ts"], 0)
+
+        # 3. 测试 /cache_opt 指令回复包含“上一轮剪切时间”
+        class DummyCmdEvent:
+            def __init__(self):
+                self.unified_msg_origin = "qq:GroupMessage:123456"
+                self.message_str = "/cache_opt"
+                self.results = []
+            def is_admin(self):
+                return True
+            def plain_result(self, text):
+                return text
+
+        ev = DummyCmdEvent()
+        async def run_cmd():
+            out = []
+            async for r in self.plugin.cmd_cache_opt(ev):
+                out.append(r)
+            return out
+
+        outputs = asyncio.run(run_cmd())
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("上一轮剪切时间:", outputs[0])
+        self.assertIn("裁掉 6 轮", outputs[0])
+
 
 if __name__ == "__main__":
     unittest.main()

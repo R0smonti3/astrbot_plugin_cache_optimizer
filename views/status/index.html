@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>提高缓存命中 · 实时运行看板</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  :root {
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --card-subtle: #f1f5f9;
+    --border: #e2e8f0;
+    --text: #0f172a;
+    --text-muted: #64748b;
+    --text-dim: #94a3b8;
+    --primary: #2563eb;
+    --primary-light: #eff6ff;
+    --success: #16a34a;
+    --success-light: #f0fdf4;
+    --warning: #d97706;
+    --warning-light: #fffbeb;
+    --danger: #dc2626;
+    --danger-light: #fef2f2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0f17;
+      --card: #151c28;
+      --card-subtle: #1e2636;
+      --border: #283347;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --primary: #3b82f6;
+      --primary-light: #1e293b;
+      --success: #22c55e;
+      --success-light: #143522;
+      --warning: #f59e0b;
+      --warning-light: #3d2c12;
+      --danger: #ef4444;
+      --danger-light: #361717;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .title-area h1 {
+    font-size: 20px;
+    font-weight: 700;
+    margin: 0 0 6px;
+  }
+  .title-area .sub {
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+  .pulse-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--success);
+    font-weight: 500;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--success-light);
+  }
+  .pulse-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--success);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+    70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+    100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+  }
+  .meta-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+    margin-bottom: 18px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 18px;
+  }
+  .meta-pill {
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .meta-pill strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .diag-banner {
+    border-radius: 12px;
+    padding: 12px 16px;
+    margin-bottom: 20px;
+    font-size: 13px;
+    border: 1px solid var(--border);
+    background: var(--card);
+  }
+  .diag-banner.healthy {
+    border-color: rgba(34, 197, 94, 0.4);
+    background: var(--success-light);
+    color: var(--success);
+  }
+  .diag-banner.warning {
+    border-color: rgba(217, 119, 6, 0.4);
+    background: var(--warning-light);
+    color: var(--warning);
+  }
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+    margin-bottom: 22px;
+  }
+  .kpi-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px 20px;
+  }
+  .kpi-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .kpi-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 6px;
+  }
+  .kpi-sub {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .progress-wrap {
+    width: 100%;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--card-subtle);
+    overflow: hidden;
+    margin-top: 8px;
+  }
+  .progress-bar {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--success);
+    transition: width 0.3s ease;
+  }
+  .progress-bar.primary {
+    background: var(--primary);
+  }
+  .panel-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 20px;
+    margin-bottom: 20px;
+  }
+  .panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .panel-title {
+    font-size: 15px;
+    font-weight: 700;
+  }
+  .session-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .tab-btn {
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--card-subtle);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .tab-btn.active {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #fff;
+  }
+  .session-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 14px;
+  }
+  .session-item {
+    background: var(--card-subtle);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .session-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-weight: 700;
+    font-size: 13px;
+  }
+  .tag {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: var(--primary-light);
+    color: var(--primary);
+  }
+  .session-meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 8px;
+  }
+  .session-meta strong {
+    color: var(--text);
+  }
+  .log-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .log-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--card-subtle);
+    font-size: 13px;
+  }
+  .empty {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 24px 10px;
+    font-size: 13px;
+  }
+  .err {
+    color: var(--danger);
+    background: var(--danger-light);
+    border: 1px solid var(--danger);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-top: 14px;
+    font-size: 13px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="title-area">
+      <h1>提高缓存命中 · 实时运行看板</h1>
+      <div class="sub">监控阶梯式历史裁剪状态、最近剪切时间与真实 Prompt Cache 命中率</div>
+    </div>
+    <div class="pulse-indicator">
+      <span class="pulse-dot"></span>
+      <span>实时同步中 (每2.5秒刷新)</span>
+    </div>
+  </div>
+
+  <div class="meta-grid" id="meta">
+    <div class="meta-pill">正在初始化通信...</div>
+  </div>
+
+  <div id="diag"></div>
+
+  <div class="kpi-grid" id="kpi"></div>
+
+  <div class="panel-card">
+    <div class="panel-head">
+      <div class="panel-title">💬 会话保活状态与轮数进度</div>
+      <div class="session-tabs" id="session-tabs"></div>
+    </div>
+    <div id="sessions"><div class="empty">正在加载会话统计...</div></div>
+  </div>
+
+  <div class="panel-card">
+    <div class="panel-head">
+      <div class="panel-title">✂️ 最近历史剪切记录</div>
+    </div>
+    <div id="logs"><div class="empty">暂无历史剪切记录</div></div>
+  </div>
+
+  <div class="err" id="err"></div>
+
+<script>
+(function () {
+  let state = null;
+  let fetchedAt = 0;
+  let isRequesting = false;
+  let selectedUmo = (function () {
+    try { return localStorage.getItem("co_selected_umo") || "ALL"; } catch (e) { return "ALL"; }
+  })();
+  let lastTabsHtml = "";
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  function fmtNum(n) {
+    return Number(n || 0).toLocaleString();
+  }
+
+  function fmtAgo(sec) {
+    if (sec == null || sec < 0) return "";
+    sec = Math.floor(sec);
+    if (sec < 60) return sec + " 秒前";
+    if (sec < 3600) return Math.floor(sec / 60) + " 分 " + (sec % 60) + " 秒前";
+    if (sec < 86400) return Math.floor(sec / 3600) + " 小时 " + Math.floor((sec % 3600) / 60) + " 分前";
+    return Math.floor(sec / 86400) + " 天前";
+  }
+
+  function fmtTs(ts) {
+    if (!ts || ts <= 0) return "";
+    const d = new Date(ts * 1000);
+    const pad = function (x) { return String(x).padStart(2, "0"); };
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " +
+      pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+  }
+
+  function shortUmo(umo) {
+    const s = String(umo || "");
+    const parts = s.split(":");
+    return parts.length >= 3 ? parts[parts.length - 1] : s;
+  }
+
+  window.selectSession = function (umo) {
+    selectedUmo = umo;
+    try { localStorage.setItem("co_selected_umo", umo); } catch (e) {}
+    render();
+  };
+
+  function getBridge() {
+    return window.AstrBotPluginPage || window.AstrBotPluginView;
+  }
+
+  async function ensureBridge() {
+    for (let i = 0; i < 40; i++) {
+      const api = getBridge();
+      if (api && typeof api.apiGet === "function") {
+        if (typeof api.ready === "function") {
+          try {
+            await Promise.race([
+              api.ready(),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 1500))
+            ]);
+          } catch (e) {}
+        }
+        return api;
+      }
+      await new Promise(r => setTimeout(r, 50));
+    }
+    return null;
+  }
+
+  async function fetchStatus() {
+    const api = await ensureBridge();
+    if (api && typeof api.apiGet === "function") {
+      return await api.apiGet("status");
+    }
+    const resp = await fetch("/astrbot_plugin_cache_optimizer/status");
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    return await resp.json();
+  }
+
+  async function load() {
+    if (isRequesting) return;
+    isRequesting = true;
+    try {
+      const res = await fetchStatus();
+      if (res && typeof res === "object") {
+        state = res;
+        fetchedAt = Date.now();
+        const errBox = document.getElementById("err");
+        errBox.style.display = "none";
+        errBox.textContent = "";
+      }
+    } catch (e) {
+      const errBox = document.getElementById("err");
+      errBox.style.display = "block";
+      errBox.textContent = "状态读取失败: " + (e && e.message ? e.message : String(e));
+    } finally {
+      isRequesting = false;
+      render();
+    }
+  }
+
+  function render() {
+    if (!state) return;
+    const elapsed = Math.floor((Date.now() - fetchedAt) / 1000);
+
+    // 1. Meta
+    const metaItems = [
+      ["运行状态", state.enabled ? '<span style="color:var(--success);">● 正常生效中</span>' : '<span style="color:var(--danger);">○ 已停用</span>'],
+      ["保留轮数 (L)", state.low_watermark_turns + " 轮"],
+      ["清理步长 (S)", state.step_turns + " 轮"],
+      ["裁剪门槛 (L+S)", "满 " + state.threshold_turns + " 轮触发"],
+      ["活跃会话数", (state.sessions ? state.sessions.length : 0) + " 个"]
+    ];
+    document.getElementById("meta").innerHTML = metaItems.map(function (it) {
+      return '<div class="meta-pill">' + esc(it[0]) + ': <strong>' + it[1] + '</strong></div>';
+    }).join("");
+
+    // 2. 诊断横幅
+    const diagBox = document.getElementById("diag");
+    if (state.diag_status === "warning" && state.diag_messages && state.diag_messages.length) {
+      diagBox.innerHTML = '<div class="diag-banner warning"><strong>⚠️ 配置健康警告：</strong><br>' +
+        state.diag_messages.map(function (m) { return "• " + esc(m); }).join("<br>") + '</div>';
+    } else if (state.diag_status === "healthy") {
+      diagBox.innerHTML = '<div class="diag-banner healthy">🟢 <strong>配置健康诊断：</strong>AstrBot 原生配置与缓存保活插件无冲突，前缀稳定保护中。</div>';
+    } else {
+      diagBox.innerHTML = "";
+    }
+
+    // 3. KPI 卡片
+    let lastEvDisplay = '<span style="color:var(--text-muted);font-size:18px;">暂无剪切记录</span>';
+    let lastEvSub = "当任意会话历史累计满 " + state.threshold_turns + " 轮时将自动触发";
+    if (state.last_eviction_ts && state.last_eviction_ts > 0) {
+      const evAgo = (state.last_eviction_ago || 0) + elapsed;
+      lastEvDisplay = esc(fmtAgo(evAgo));
+      const umoNote = state.last_eviction_umo ? " · 会话 " + esc(shortUmo(state.last_eviction_umo)) : "";
+      lastEvSub = fmtTs(state.last_eviction_ts) + " · 裁掉 " + (state.last_eviction_turns || 0) + " 轮" + umoNote;
+    }
+
+    const hitRatePct = state.hit_rate_pct != null ? state.hit_rate_pct : 0;
+    const hitRateStr = state.hit_rate_pct != null ? state.hit_rate_pct.toFixed(2) + "%" : "暂无数据";
+
+    document.getElementById("kpi").innerHTML =
+      '<div class="kpi-card">' +
+        '<div class="kpi-label">✂️ 上一轮剪切时间</div>' +
+        '<div class="kpi-value">' + lastEvDisplay + '</div>' +
+        '<div class="kpi-sub">' + lastEvSub + '</div>' +
+      '</div>' +
+      '<div class="kpi-card">' +
+        '<div class="kpi-label">⚡ 加权平均缓存命中率</div>' +
+        '<div class="kpi-value" style="color:var(--success);">' + esc(hitRateStr) + '</div>' +
+        '<div class="kpi-sub">命中 ' + fmtNum(state.total_cached_tokens) + ' / 未命中 ' + fmtNum(state.total_other_tokens) + ' Tokens</div>' +
+        '<div class="progress-wrap"><div class="progress-bar" style="width:' + Math.min(100, hitRatePct) + '%"></div></div>' +
+      '</div>' +
+      '<div class="kpi-card">' +
+        '<div class="kpi-label">📊 累计请求与裁剪</div>' +
+        '<div class="kpi-value">' + fmtNum(state.total_requests) + ' <span style="font-size:14px;font-weight:500;color:var(--text-muted);">次请求</span></div>' +
+        '<div class="kpi-sub">触发剪切 ' + fmtNum(state.eviction_count) + ' 次 · 累计淘汰 ' + fmtNum(state.evicted_user_turns) + ' 轮旧历史</div>' +
+      '</div>';
+
+    // 4. 会话筛选与展示
+    const sessions = state.sessions || [];
+    if (selectedUmo !== "ALL" && !sessions.some(function (s) { return s.umo === selectedUmo; })) {
+      selectedUmo = "ALL";
+    }
+    const tabsBox = document.getElementById("session-tabs");
+    if (sessions.length) {
+      let tabsHtml = '<button class="tab-btn' + (selectedUmo === "ALL" ? ' active' : '') + '" onclick="window.selectSession(\'ALL\')">全部 (' + sessions.length + ')</button>';
+      sessions.forEach(function (s) {
+        const active = selectedUmo === s.umo ? ' active' : '';
+        const safeUmo = esc(s.umo).replace(/'/g, "&#39;");
+        tabsHtml += '<button class="tab-btn' + active + '" title="' + esc(s.umo) + '" onclick="window.selectSession(\'' + safeUmo + '\')">' + esc(shortUmo(s.umo)) + '</button>';
+      });
+      if (tabsHtml !== lastTabsHtml) {
+        tabsBox.innerHTML = tabsHtml;
+        lastTabsHtml = tabsHtml;
+      }
+    } else {
+      tabsBox.innerHTML = "";
+      lastTabsHtml = "";
+    }
+
+    const visibleSessions = selectedUmo === "ALL" ? sessions : sessions.filter(function (s) { return s.umo === selectedUmo; });
+    const sesBox = document.getElementById("sessions");
+    if (!visibleSessions.length) {
+      sesBox.innerHTML = '<div class="empty">暂无活跃会话记录（产生对话请求后将自动呈现）</div>';
+    } else {
+      sesBox.innerHTML = '<div class="session-list">' + visibleSessions.map(function (s) {
+        const pct = Math.min(100, Math.round((s.current_user_turns / Math.max(1, state.threshold_turns)) * 100));
+        const sHit = s.hit_rate_pct != null ? s.hit_rate_pct.toFixed(2) + "%" : "暂无数据";
+        const sEvStr = s.last_eviction_ts > 0
+          ? fmtAgo((s.last_eviction_ago || 0) + elapsed) + " (" + fmtTs(s.last_eviction_ts).slice(11) + ")"
+          : "暂无剪切";
+        return '<div class="session-item">' +
+          '<div class="session-top">' +
+            '<span title="' + esc(s.umo) + '">📌 ' + esc(s.umo) + '</span>' +
+            '<span class="tag">当前 ' + s.current_user_turns + ' / ' + state.threshold_turns + ' 轮</span>' +
+          '</div>' +
+          '<div class="progress-wrap"><div class="progress-bar primary" style="width:' + pct + '%"></div></div>' +
+          '<div class="session-meta">' +
+            '<div>请求次数: <strong>' + s.requests + ' 次</strong></div>' +
+            '<div>缓存命中率: <strong style="color:var(--success);">' + esc(sHit) + '</strong></div>' +
+            '<div>触发剪切: <strong>' + s.evictions + ' 次 (共' + s.evicted_turns + '轮)</strong></div>' +
+            '<div>上一轮剪切: <strong>' + esc(sEvStr) + '</strong></div>' +
+          '</div>' +
+        '</div>';
+      }).join("") + '</div>';
+    }
+
+    // 5. 最近历史剪切记录
+    const logs = state.eviction_logs || [];
+    const logsBox = document.getElementById("logs");
+    if (!logs.length) {
+      logsBox.innerHTML = '<div class="empty">暂无历史剪切记录</div>';
+    } else {
+      logsBox.innerHTML = '<div class="log-list">' + logs.map(function (l) {
+        const agoStr = fmtAgo((l.ago || 0) + elapsed);
+        return '<div class="log-item">' +
+          '<div><strong>' + esc(l.umo) + '</strong> · 历史从 <strong>' + l.before_turns + ' 轮</strong> 裁剪至 <strong>' + l.after_turns + ' 轮</strong>（淘汰 ' + l.evicted_turns + ' 轮）</div>' +
+          '<div style="color:var(--text-muted);font-size:12px;">' + esc(l.time_str) + ' (' + esc(agoStr) + ')</div>' +
+        '</div>';
+      }).join("") + '</div>';
+    }
+  }
+
+  load();
+  setInterval(render, 1000);
+  setInterval(load, 2500);
+})();
+</script>
+</body>
+</html>

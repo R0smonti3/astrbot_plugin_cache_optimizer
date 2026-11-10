@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import re
+import time
+from datetime import datetime
 from typing import Any
 
 from astrbot.api import logger
@@ -72,6 +74,23 @@ def _check_system_prompt_timestamp(system_prompt: str | None) -> list[str]:
     return []
 
 
+def _format_eviction_time(ts: float | int) -> str:
+    """将剪切时间戳格式化为可读字符串，未发生过则返回 '暂无剪切记录'。"""
+    if not ts or ts <= 0:
+        return "暂无剪切记录"
+    diff = max(0, int(time.time() - ts))
+    if diff < 60:
+        ago = f"{diff} 秒前"
+    elif diff < 3600:
+        ago = f"{diff // 60} 分 {diff % 60} 秒前"
+    elif diff < 86400:
+        ago = f"{diff // 3600} 小时 {(diff % 3600) // 60} 分前"
+    else:
+        ago = f"{diff // 86400} 天前"
+    dt_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    return f"{dt_str} ({ago})"
+
+
 class CacheOptimizerPlugin(Star):
     """大模型提示词缓存保活插件 (CacheOptimizer)：
     1. 阶梯式历史裁剪：按合法的普通 User 轮数精准计数，当历史累计满 L + S 轮时触发裁剪，
@@ -80,24 +99,37 @@ class CacheOptimizerPlugin(Star):
        杜绝工具调用事务被截断导致的 400 报错；
     3. 多厂商 Token Usage 监控：兼容 DeepSeek、OpenAI、Claude、Gemini 的 Prompt Cache 命中率统计；
     4. 高频动态时间戳与原生配置冲突诊断：实时检测秒级时间戳击穿前缀与原生 max_turns 截断风险；
-    5. 支持全局与分会话独立查看运行指标 (/cache_opt [here])。
+    5. 支持全局与分会话独立查看运行指标 (/cache_opt [here]) 及 Web 可视化看板。
     """
 
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
         self.config = config if config is not None else {}
         self._checked_umos: set[str] = set()
-        self._stats = {
+        self._stats: dict[str, Any] = {
             "total_requests": 0,
             "eviction_count": 0,
             "evicted_user_turns": 0,
             "total_cached_tokens": 0,
             "total_other_tokens": 0,
             "response_count": 0,
+            "last_eviction_ts": 0.0,
+            "last_eviction_turns": 0,
+            "last_eviction_umo": "",
         }
-        self._session_stats: dict[str, dict[str, int]] = {}
+        self._session_stats: dict[str, dict[str, Any]] = {}
+        self._eviction_logs: list[dict[str, Any]] = []
 
-    def _get_session_stat(self, umo: str) -> dict[str, int]:
+    async def initialize(self) -> None:
+        for route in ("/astrbot_plugin_cache_optimizer/status", "/cache_optimizer/status"):
+            try:
+                self.context.register_web_api(
+                    route, self._api_status, ["GET"], "缓存优化状态"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[CacheOptimizer] 注册状态接口失败: {exc}")
+
+    def _get_session_stat(self, umo: str) -> dict[str, Any]:
         if umo not in self._session_stats:
             if len(self._session_stats) >= 200:
                 self._session_stats.pop(next(iter(self._session_stats)))
@@ -107,6 +139,10 @@ class CacheOptimizerPlugin(Star):
                 "evicted_turns": 0,
                 "cached_tokens": 0,
                 "other_tokens": 0,
+                "current_user_turns": 0,
+                "last_request_ts": 0.0,
+                "last_eviction_ts": 0.0,
+                "last_eviction_turns": 0,
             }
         return self._session_stats[umo]
 
@@ -192,9 +228,12 @@ class CacheOptimizerPlugin(Star):
         if not self._is_enabled() or not req:
             return
 
+        now_ts = time.time()
         self._stats["total_requests"] += 1
         umo = str(getattr(event, "unified_msg_origin", "") or "default")
-        self._get_session_stat(umo)["requests"] += 1
+        s_stat = self._get_session_stat(umo)
+        s_stat["requests"] += 1
+        s_stat["last_request_ts"] = now_ts
         self._check_framework_config(umo, getattr(req, "system_prompt", None))
 
         # 核心：阶梯式历史裁剪（随 AstrBot 正常流程写回数据库）
@@ -216,6 +255,9 @@ class CacheOptimizerPlugin(Star):
             i for i, msg in enumerate(contexts) if _is_valid_user_message(msg)
         ]
         total_user_turns = len(user_indices)
+
+        if umo:
+            self._get_session_stat(umo)["current_user_turns"] = total_user_turns
 
         # 2. 当前钩子执行时，当前用户消息尚未加入 req.contexts。
         # 当历史中的合法 User 消息数 >= L + S 时触发裁剪。
@@ -248,16 +290,35 @@ class CacheOptimizerPlugin(Star):
                 break
 
         # 6. 执行切片：保留预设前缀 + 最近 L 条历史 User 消息及其附属的全部 Assistant、Tool 消息
+        now_ts = time.time()
         evicted_turns = total_user_turns - L
         contexts[:] = prefix_no_save + contexts[cut_idx:]
 
         self._stats["eviction_count"] += 1
         self._stats["evicted_user_turns"] += evicted_turns
+        self._stats["last_eviction_ts"] = now_ts
+        self._stats["last_eviction_turns"] = evicted_turns
+        self._stats["last_eviction_umo"] = umo
 
         if umo:
             s_stat = self._get_session_stat(umo)
             s_stat["evictions"] += 1
             s_stat["evicted_turns"] += evicted_turns
+            s_stat["current_user_turns"] = L
+            s_stat["last_eviction_ts"] = now_ts
+            s_stat["last_eviction_turns"] = evicted_turns
+
+        self._eviction_logs.append(
+            {
+                "ts": now_ts,
+                "umo": umo or "default",
+                "before_turns": total_user_turns,
+                "after_turns": L,
+                "evicted_turns": evicted_turns,
+            }
+        )
+        if len(self._eviction_logs) > 20:
+            del self._eviction_logs[: len(self._eviction_logs) - 20]
 
         if self._debug_log_enabled():
             logger.debug(
@@ -286,6 +347,90 @@ class CacheOptimizerPlugin(Star):
             s_stat["other_tokens"] += other
 
     # ------------------------------------------------------------------
+    # Web 可视化看板状态接口
+    # ------------------------------------------------------------------
+    def _status_payload(self) -> dict[str, Any]:
+        now_ts = time.time()
+        L = self._low_watermark_turns()
+        S = self._step_turns()
+        threshold = L + S
+
+        cached_tokens = int(self._stats["total_cached_tokens"])
+        other_tokens = int(self._stats["total_other_tokens"])
+        total_tokens = cached_tokens + other_tokens
+        hit_rate_pct = round(cached_tokens / total_tokens * 100, 2) if total_tokens > 0 else None
+
+        last_ev_ts = float(self._stats.get("last_eviction_ts") or 0.0)
+        diag_status, diag_msgs = self._diagnose_framework_config(None)
+
+        sessions = []
+        for umo, s in self._session_stats.items():
+            s_cached = int(s["cached_tokens"])
+            s_other = int(s["other_tokens"])
+            s_total = s_cached + s_other
+            s_ev_ts = float(s.get("last_eviction_ts") or 0.0)
+            s_req_ts = float(s.get("last_request_ts") or 0.0)
+            sessions.append(
+                {
+                    "umo": umo,
+                    "requests": s["requests"],
+                    "evictions": s["evictions"],
+                    "evicted_turns": s["evicted_turns"],
+                    "current_user_turns": s.get("current_user_turns", 0),
+                    "cached_tokens": s_cached,
+                    "other_tokens": s_other,
+                    "total_tokens": s_total,
+                    "hit_rate_pct": round(s_cached / s_total * 100, 2) if s_total > 0 else None,
+                    "last_request_ago": max(0, int(now_ts - s_req_ts)) if s_req_ts > 0 else None,
+                    "last_eviction_ts": s_ev_ts,
+                    "last_eviction_ago": max(0, int(now_ts - s_ev_ts)) if s_ev_ts > 0 else None,
+                    "last_eviction_time_str": _format_eviction_time(s_ev_ts),
+                    "last_eviction_turns": s.get("last_eviction_turns", 0),
+                }
+            )
+        sessions.sort(key=lambda x: x["last_request_ago"] if x["last_request_ago"] is not None else 9999999)
+
+        logs = [
+            {
+                "ts": item["ts"],
+                "time_str": datetime.fromtimestamp(item["ts"]).strftime("%Y-%m-%d %H:%M:%S"),
+                "ago": max(0, int(now_ts - item["ts"])),
+                "umo": item["umo"],
+                "before_turns": item["before_turns"],
+                "after_turns": item["after_turns"],
+                "evicted_turns": item["evicted_turns"],
+            }
+            for item in reversed(self._eviction_logs)
+        ]
+
+        return {
+            "enabled": self._is_enabled(),
+            "low_watermark_turns": L,
+            "step_turns": S,
+            "threshold_turns": threshold,
+            "total_requests": self._stats["total_requests"],
+            "eviction_count": self._stats["eviction_count"],
+            "evicted_user_turns": self._stats["evicted_user_turns"],
+            "response_count": self._stats["response_count"],
+            "total_cached_tokens": cached_tokens,
+            "total_other_tokens": other_tokens,
+            "total_tokens": total_tokens,
+            "hit_rate_pct": hit_rate_pct,
+            "last_eviction_ts": last_ev_ts,
+            "last_eviction_ago": max(0, int(now_ts - last_ev_ts)) if last_ev_ts > 0 else None,
+            "last_eviction_time_str": _format_eviction_time(last_ev_ts),
+            "last_eviction_turns": self._stats.get("last_eviction_turns", 0),
+            "last_eviction_umo": self._stats.get("last_eviction_umo", ""),
+            "diag_status": diag_status,
+            "diag_messages": diag_msgs,
+            "sessions": sessions,
+            "eviction_logs": logs,
+        }
+
+    async def _api_status(self):
+        return self._status_payload()
+
+    # ------------------------------------------------------------------
     # 状态与诊断指令（双重管理员权限保护，支持 /cache_opt here）
     # ------------------------------------------------------------------
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -312,6 +457,10 @@ class CacheOptimizerPlugin(Star):
             evicted_turns = s_stat["evicted_turns"]
             cached_tokens = s_stat["cached_tokens"]
             other_tokens = s_stat["other_tokens"]
+            last_ev_ts = float(s_stat.get("last_eviction_ts") or 0.0)
+            last_ev_str = _format_eviction_time(last_ev_ts)
+            if last_ev_ts > 0 and s_stat.get("last_eviction_turns"):
+                last_ev_str += f" (裁掉 {s_stat['last_eviction_turns']} 轮)"
             title_prefix = f"【当前会话独立缓存统计】({umo})"
         else:
             reqs = self._stats["total_requests"]
@@ -319,6 +468,12 @@ class CacheOptimizerPlugin(Star):
             evicted_turns = self._stats["evicted_user_turns"]
             cached_tokens = self._stats["total_cached_tokens"]
             other_tokens = self._stats["total_other_tokens"]
+            last_ev_ts = float(self._stats.get("last_eviction_ts") or 0.0)
+            last_ev_str = _format_eviction_time(last_ev_ts)
+            if last_ev_ts > 0 and self._stats.get("last_eviction_turns"):
+                ev_umo = self._stats.get("last_eviction_umo") or ""
+                umo_note = f", 会话 {ev_umo}" if ev_umo else ""
+                last_ev_str += f" (裁掉 {self._stats['last_eviction_turns']} 轮{umo_note})"
             title_prefix = f"【全局累计缓存保活统计】(活跃会话数: {len(self._session_stats)})"
 
         total_tokens = cached_tokens + other_tokens
@@ -349,6 +504,7 @@ class CacheOptimizerPlugin(Star):
             f"---------------------------------\n"
             f"{title_prefix}\n"
             f"处理 LLM 请求: {reqs} 次 | 历史裁剪触发: {evictions} 次 (累计淘汰 {evicted_turns} 轮旧历史)\n"
+            f"上一轮剪切时间: {last_ev_str}\n"
             f"命中缓存 Tokens: {cached_tokens:,}\n"
             f"未命中 Tokens: {other_tokens:,}\n"
             f"总计输入 Tokens: {total_tokens:,}\n"
