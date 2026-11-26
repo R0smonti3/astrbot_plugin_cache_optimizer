@@ -172,6 +172,7 @@ class CacheOptimizerPlugin(Star):
         if system_prompt:
             warnings.extend(_check_system_prompt_timestamp(system_prompt))
 
+        inspected_compression = False
         try:
             cfg = self.context.get_config(umo=umo)
             if cfg and isinstance(cfg, dict):
@@ -181,6 +182,7 @@ class CacheOptimizerPlugin(Star):
                     if isinstance(runner_config, dict):
                         compression = runner_config.get("compression")
                         if isinstance(compression, dict):
+                            inspected_compression = True
                             max_turns = compression.get("max_turns", -1)
                             threshold_turns = self._low_watermark_turns() + self._step_turns()
 
@@ -207,6 +209,8 @@ class CacheOptimizerPlugin(Star):
 
         if warnings:
             return "warning", warnings
+        if not inspected_compression:
+            return "unknown", ["无法读取有效的框架上下文压缩配置，暂时无法确认是否存在原生配置冲突。"]
         return "healthy", []
 
     def _check_framework_config(self, umo: str | None = None, system_prompt: str | None = None) -> None:
